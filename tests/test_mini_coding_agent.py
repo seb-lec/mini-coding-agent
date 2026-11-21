@@ -1,13 +1,16 @@
-import json
+from types import SimpleNamespace
+
 import pytest
 from unittest.mock import patch
 
 from mini_coding_agent import (
     FakeModelClient,
     MiniAgent,
-    OllamaModelClient,
+    OpenAIModelClient,
     SessionStore,
     WorkspaceContext,
+    build_agent as build_runtime_agent,
+    build_arg_parser,
     build_welcome,
 )
 
@@ -239,7 +242,7 @@ def test_welcome_screen_keeps_box_shape_for_long_paths(tmp_path):
     deep.mkdir(parents=True)
     agent = build_agent(deep, [])
 
-    welcome = build_welcome(agent, model="qwen3.5:4b", host="http://127.0.0.1:11434")
+    welcome = build_welcome(agent, model="gpt-4.1-mini")
     lines = welcome.splitlines()
 
     assert len(lines) >= 5
@@ -358,42 +361,64 @@ def test_history_text_deduplicates_unchanged_repeated_reads(tmp_path):
     assert history.count("stable") == 1
 
 
-def test_ollama_client_posts_expected_payload():
+def test_openai_client_sends_expected_request():
     captured = {}
 
-    class FakeResponse:
-        def __enter__(self):
-            return self
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+            self.chat = SimpleNamespace(
+                completions=SimpleNamespace(create=self.create)
+            )
 
-        def __exit__(self, exc_type, exc, tb):
-            return False
+        def create(self, **kwargs):
+            captured["request"] = kwargs
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="<final>ok</final>"))]
+            )
 
-        def read(self):
-            return json.dumps({"response": "<final>ok</final>"}).encode("utf-8")
-
-    def fake_urlopen(request, timeout):
-        captured["url"] = request.full_url
-        captured["timeout"] = timeout
-        captured["body"] = json.loads(request.data.decode("utf-8"))
-        return FakeResponse()
-
-    client = OllamaModelClient(
-        model="qwen3.5:4b",
-        host="http://127.0.0.1:11434",
-        temperature=0.2,
-        top_p=0.9,
-        timeout=30,
-    )
-
-    with patch("urllib.request.urlopen", fake_urlopen):
+    with patch("mini_coding_agent.OpenAI", FakeOpenAI):
+        client = OpenAIModelClient(
+            model="gpt-4.1-mini",
+            endpoint="https://example.openai.azure.com/openai/v1/",
+            api_key="test-key",
+            temperature=0.2,
+            top_p=0.9,
+            timeout=30,
+        )
         result = client.complete("hello", 42)
 
     assert result == "<final>ok</final>"
-    assert captured["url"] == "http://127.0.0.1:11434/api/generate"
-    assert captured["timeout"] == 30
-    assert captured["body"]["model"] == "qwen3.5:4b"
-    assert captured["body"]["prompt"] == "hello"
-    assert captured["body"]["stream"] is False
-    assert captured["body"]["raw"] is False
-    assert captured["body"]["think"] is False
-    assert captured["body"]["options"]["num_predict"] == 42
+    assert captured["client"] == {
+        "api_key": "test-key",
+        "base_url": "https://example.openai.azure.com/openai/v1/",
+        "timeout": 30,
+    }
+    assert captured["request"] == {
+        "model": "gpt-4.1-mini",
+        "messages": [{"role": "user", "content": "hello"}],
+        "max_tokens": 42,
+        "temperature": 0.2,
+        "top_p": 0.9,
+    }
+
+
+def test_build_agent_uses_azure_named_openai_compatible_environment(tmp_path, monkeypatch):
+    captured = {}
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.delenv("OPENAI_ENDPOINT", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com/openai/v1/")
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "azure-key")
+    args = build_arg_parser().parse_args(["--cwd", str(tmp_path)])
+
+    with patch("mini_coding_agent.OpenAI", FakeOpenAI):
+        agent = build_runtime_agent(args)
+
+    assert isinstance(agent.model_client, OpenAIModelClient)
+    assert captured["base_url"] == "https://example.openai.azure.com/openai/v1/"
+    assert captured["api_key"] == "azure-key"

@@ -15,7 +15,7 @@ It is a minimal local agent loop with:
 - transcript and memory persistence
 - bounded delegation
 
-The model backend is currently based on Ollama.
+The model backend uses the OpenAI Python SDK and any OpenAI-compatible endpoint.
 
 <a href="https://magazine.sebastianraschka.com/p/components-of-a-coding-agent">
   <img src="https://substack-post-media.s3.amazonaws.com/public/images/49b97718-57f4-4977-99c8-8ad5c4d32af3_1548x862.png" width="500px">
@@ -54,45 +54,37 @@ This coding harness is organized around six practical building blocks:
 You need:
 
 - Python 3.10+
-- Ollama installed
-- an Ollama model pulled locally
+- an OpenAI API key or compatible endpoint API key
 
 Optional:
 
 - `uv` for environment management and the `mini-coding-agent` CLI entry point
 
-This project has no Python runtime dependency beyond the standard library, so you can run it directly with `python mini_coding_agent.py` if you do not want to use `uv`.
+Install the project dependencies with `uv sync`, or install the package with pip.
 
 &nbsp;
-## Install Ollama
+## Configure the API
 
-Install Ollama on your machine so the `ollama` command is available in your shell.
-
-Official installation link: [ollama.com/download](https://ollama.com/download)
-
-Then verify:
+Set an API key before starting the agent:
 
 ```bash
-ollama --help
+export OPENAI_API_KEY="..."
 ```
 
-Start the server:
+For an OpenAI-compatible endpoint, also set its base URL:
 
 ```bash
-ollama serve
+export OPENAI_ENDPOINT="https://example.com/v1/"
 ```
 
-In another terminal, pull a model. Example:
+The Azure-named variables are accepted as fallbacks for the same compatible API:
 
 ```bash
-ollama pull qwen3.5:4b
+export AZURE_OPENAI_API_KEY="..."
+export AZURE_OPENAI_ENDPOINT="https://example.openai.azure.com/openai/v1/"
 ```
 
-Qwen 3.5 model library:
-
-- [ollama.com/library/qwen3.5](https://ollama.com/library/qwen3.5)
-
-The default in this project is `qwen3.5:4b`. If you have sufficient memory, it is worth trying a larger model such as `qwen3.5:9b` or another larger Qwen 3.5 variant. The agent just sends prompts to Ollama's `/api/generate` endpoint.
+When both naming schemes are present, `OPENAI_ENDPOINT` and `OPENAI_API_KEY` take precedence. If no endpoint is set, the SDK uses the standard OpenAI API endpoint.
 
 &nbsp;
 ## Project Setup
@@ -132,7 +124,7 @@ python mini_coding_agent.py
 
 By default it uses:
 
-- model: `qwen3.5:4b`
+- model: `gpt-4.1-mini`
 - approval: `ask`
 
 For a concrete usage example, see [EXAMPLE.md](EXAMPLE.md).
@@ -220,11 +212,9 @@ Important flags:
 - `--cwd`
   sets the workspace directory the agent should inspect and modify; default: `.`
 - `--model`
-  selects the Ollama model name, such as `qwen3.5:4b`; default: `qwen3.5:4b`
-- `--host`
-  points the agent at the Ollama server URL (usually not needed); default: `http://127.0.0.1:11434`
-- `--ollama-timeout`
-  controls how long the client waits for an Ollama response (usually not needed); default: `300` seconds
+  selects an OpenAI model or compatible endpoint deployment name; default: `gpt-4.1-mini`
+- `--timeout`
+  controls how long the client waits for an API response; default: `300` seconds
 - `--resume`
   resumes a saved session by id or uses `latest`; default: start a new session
 - `--approval`
@@ -247,6 +237,6 @@ See [EXAMPLE.md](EXAMPLE.md)
 ## Notes & Tips
 
 - The agent expects the model to emit either `<tool>...</tool>` or `<final>...</final>`.
-- Different Ollama models will follow those instructions with different reliability.
+- Different models will follow those instructions with different reliability.
 - If the model does not follow the format well, use a stronger instruction-following model.
 - The agent is intentionally small and optimized for readability, not robustness.

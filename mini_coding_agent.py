@@ -1,14 +1,15 @@
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
-import urllib.error
-import urllib.request
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+from openai import OpenAI
 
 
 DOC_NAMES = ("AGENTS.md", "README.md", "pyproject.toml", "package.json")
@@ -176,50 +177,25 @@ class FakeModelClient:
         return self.outputs.pop(0)
 
 
-class OllamaModelClient:
-    def __init__(self, model, host, temperature, top_p, timeout):
+class OpenAIModelClient:
+    def __init__(self, model, endpoint, api_key, temperature, top_p, timeout):
         self.model = model
-        self.host = host.rstrip("/")
         self.temperature = temperature
         self.top_p = top_p
-        self.timeout = timeout
+        self.client = OpenAI(api_key=api_key, base_url=endpoint + "/openai/v1/", timeout=timeout)
 
     def complete(self, prompt, max_new_tokens):
-        payload = {
-            "model": self.model,
-            "prompt": prompt,
-            "stream": False,
-            "raw": False,
-            "think": False,
-            "options": {
-                "num_predict": max_new_tokens,
-                "temperature": self.temperature,
-                "top_p": self.top_p,
-            },
-        }
-        request = urllib.request.Request(
-            self.host + "/api/generate",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                data = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"Ollama request failed with HTTP {exc.code}: {body}") from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(
-                "Could not reach Ollama.\n"
-                "Make sure `ollama serve` is running and the model is available.\n"
-                f"Host: {self.host}\n"
-                f"Model: {self.model}"
-            ) from exc
-
-        if data.get("error"):
-            raise RuntimeError(f"Ollama error: {data['error']}")
-        return data.get("response", "")
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                max_completion_tokens=max_new_tokens,
+                # temperature=self.temperature,
+                # top_p=self.top_p,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"OpenAI request failed: {exc}") from exc
+        return response.choices[0].message.content or ""
 
 
 class MiniAgent:
@@ -366,7 +342,7 @@ class MiniAgent:
             "- Required tool arguments must not be empty. Do not call read_file, write_file, patch_file, run_shell, or delegate with args={}.",
         ])
         return "\n\n".join([
-            "You are Mini-Coding-Agent, a small local coding agent running through Ollama.",
+            "You are Mini-Coding-Agent, a small coding agent running through the OpenAI API.",
             "Rules:\n" + rules,
             "Tools:\n" + tool_text,
             "Valid response examples:\n" + examples,
@@ -866,7 +842,7 @@ class MiniAgent:
         return "delegate_result:\n" + child.ask(task)
 
 
-def build_welcome(agent, model, host):
+def build_welcome(agent, model):
     width = max(68, min(shutil.get_terminal_size((80, 20)).columns, 84))
     inner = width - 4
     gap = 3
@@ -912,12 +888,19 @@ def build_welcome(agent, model, host):
 def build_agent(args):
     workspace = WorkspaceContext.build(args.cwd)
     store = SessionStore(Path(workspace.repo_root) / ".mini-coding-agent" / "sessions")
-    model = OllamaModelClient(
+    endpoint = os.getenv("OPENAI_ENDPOINT") or os.getenv("AZURE_OPENAI_ENDPOINT")
+    api_key = os.getenv("OPENAI_API_KEY") or os.getenv("AZURE_OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "Set OPENAI_API_KEY or AZURE_OPENAI_API_KEY before starting the agent."
+        )
+    model = OpenAIModelClient(
         model=args.model,
-        host=args.host,
+        endpoint=endpoint,
+        api_key=api_key,
         temperature=args.temperature,
         top_p=args.top_p,
-        timeout=args.ollama_timeout,
+        timeout=args.timeout,
     )
     session_id = args.resume
     if session_id == "latest":
@@ -945,13 +928,12 @@ def build_agent(args):
 def build_arg_parser():
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-        description="Minimal coding agent for Ollama models.",
+        description="Minimal coding agent for OpenAI-compatible models.",
     )
     parser.add_argument("prompt", nargs="*", help="Optional one-shot prompt.")
     parser.add_argument("--cwd", default=".", help="Workspace directory.")
-    parser.add_argument("--model", default="qwen3.5:4b", help="Ollama model name.")
-    parser.add_argument("--host", default="http://127.0.0.1:11434", help="Ollama server URL.")
-    parser.add_argument("--ollama-timeout", type=int, default=300, help="Ollama request timeout in seconds.")
+    parser.add_argument("--model", default="gpt-5.6-terra", help="OpenAI model or compatible deployment name.")
+    parser.add_argument("--timeout", type=int, default=300, help="OpenAI request timeout in seconds.")
     parser.add_argument("--resume", default=None, help="Session id to resume or 'latest'.")
     parser.add_argument(
         "--approval",
@@ -961,16 +943,20 @@ def build_arg_parser():
     )
     parser.add_argument("--max-steps", type=int, default=6, help="Maximum tool/model iterations per request.")
     parser.add_argument("--max-new-tokens", type=int, default=512, help="Maximum model output tokens per step.")
-    parser.add_argument("--temperature", type=float, default=0.2, help="Sampling temperature sent to Ollama.")
-    parser.add_argument("--top-p", type=float, default=0.9, help="Top-p sampling value sent to Ollama.")
+    parser.add_argument("--temperature", type=float, default=0.2, help="Sampling temperature.")
+    parser.add_argument("--top-p", type=float, default=0.9, help="Nucleus sampling value.")
     return parser
 
 
 def main(argv=None):
     args = build_arg_parser().parse_args(argv)
-    agent = build_agent(args)
+    try:
+        agent = build_agent(args)
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
 
-    print(build_welcome(agent, model=args.model, host=args.host))
+    print(build_welcome(agent, model=args.model))
 
     if args.prompt:
         prompt = " ".join(args.prompt).strip()
